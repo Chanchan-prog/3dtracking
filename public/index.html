@@ -1,0 +1,178 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>3D School Attendance (Static React)</title>
+    <link rel="stylesheet" href="../src/styles/App.css" />
+
+    <!-- Bootstrap CSS and Icons -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-" crossorigin="anonymous">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css" rel="stylesheet">
+
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/sweetalert2@11/dist/sweetalert2.min.css" />
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <!-- Simple runtime error overlay to help debug blank page in browser -->
+    <div id="js-error-overlay" style="display:none;position:fixed;left:0;right:0;top:0;bottom:0;background:rgba(0,0,0,0.85);color:#fff;padding:20px;z-index:99999;overflow:auto;white-space:pre-wrap;font-family:monospace;">
+      <div style="font-size:18px;font-weight:bold;margin-bottom:10px;">JavaScript Error</div>
+      <div id="js-error-content"></div>
+      <div style="margin-top:12px;"><button id="js-error-close" style="padding:8px 12px;border-radius:6px;border:none;background:#fff;color:#000;">Close</button></div>
+    </div>
+    <script>
+      (function(){
+        function showError(msg){
+          try{
+            var overlay = document.getElementById('js-error-overlay');
+            var content = document.getElementById('js-error-content');
+            if(overlay && content){ content.textContent = msg; overlay.style.display = 'block'; }
+            else alert(msg);
+          }catch(e){ console.error('Error overlay failed', e); }
+        }
+        window.addEventListener('error', function(e){ var s = (e && e.message) ? e.message + '\n' + (e.filename||'') + ':' + (e.lineno||'') : String(e); showError('Error: '+s); });
+        window.addEventListener('unhandledrejection', function(ev){ showError('UnhandledPromiseRejection:\n' + (ev.reason && ev.reason.message ? ev.reason.message : String(ev.reason))); });
+        document.addEventListener('click', function(ev){ if(ev.target && ev.target.id === 'js-error-close'){ var o=document.getElementById('js-error-overlay'); if(o) o.style.display='none'; } });
+      })();
+    </script>
+
+    <!-- React and Babel (no build tools required) -->
+    <script crossorigin src="https://unpkg.com/react@17/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@17/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/html5-qrcode@2.3.7/minified/html5-qrcode.min.js"></script>
+    <!-- QR code generator (used by QrModal) -->
+    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
+    <!-- Spreadsheet parsing (XLSX/CSV import) -->
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <!-- 3D viewer (model-viewer web component) -->
+    <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
+    <script nomodule src="https://unpkg.com/@google/model-viewer/dist/model-viewer-legacy.js"></script>
+    <!-- Note: a server-side QR proxy is available at /server-php/api/qrcode?data=... to avoid CORS issues -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+
+    <!-- In-browser module loader + JSX transpilation (no bundler) -->
+    <script>
+      (async function(){
+        // Map of absolute URL -> blob URL
+        const blobCache = new Map();
+
+        // Map for generated virtual modules (like 'react' and 'react-dom')
+        const virtualCache = new Map();
+
+        function resolveUrl(specifier, baseUrl) {
+          try {
+            return new URL(specifier, baseUrl).href;
+          } catch (e) {
+            return specifier; // leave as-is for bare imports
+          }
+        }
+
+        // Create a virtual module that exposes UMD globals as ES module
+        function createVirtualModule(name) {
+          if (virtualCache.has(name)) return virtualCache.get(name);
+          let code = '';
+          if (name === 'react') {
+            code = `const R = window.React; export default R; export const {useState, useEffect, useRef, useContext, createContext, useReducer, useMemo, useCallback, Fragment, memo, useLayoutEffect} = R;`;
+          } else if (name === 'react-dom') {
+            code = `const RD = window.ReactDOM; export default RD;`;
+          } else if (name === 'html5-qrcode') {
+            code = `export default window.Html5Qrcode;`;
+          } else if (name === 'qrcode') {
+            code = `export default window.QRCode;`;
+          } else {
+            // fallback: expose global with same name (window[name])
+            code = `export default window['${name}'];`;
+          }
+          const blob = new Blob([code], { type: 'text/javascript' });
+          const url = URL.createObjectURL(blob);
+          virtualCache.set(name, url);
+          return url;
+        }
+
+        // Fetch, transform (JSX -> JS) and create blob URL for a module and its dependencies
+        async function processModule(url) {
+          if (!url) throw new Error('Invalid module URL: ' + url);
+          if (blobCache.has(url)) return blobCache.get(url);
+
+          // handle bare imports like 'react'
+          if (!/^https?:\/\//i.test(url) && !url.startsWith('/') && !url.startsWith('./') && !url.startsWith('../')) {
+            // treat as virtual
+            const v = createVirtualModule(url);
+            blobCache.set(url, v);
+            return v;
+          }
+
+          const resp = await fetch(url, { cache: 'no-store' });
+          if (!resp.ok) throw new Error('Failed to fetch ' + url + ' : ' + resp.statusText);
+          let code = await resp.text();
+
+          // find import/export specifiers to resolve dependencies
+          // match import ... from '...'; import '...'; export ... from '...'
+          const importRegex = /(?:import\s+(?:[^'";]+?)?\s*from\s*|import\s*)['"]([^'"]+)['"];?|export\s+[^;]*?from\s+['"]([^'"]+)['"]/g;
+          let m;
+          const replacements = [];
+          while ((m = importRegex.exec(code)) !== null) {
+            const spec = m[1] || m[2];
+            if (!spec) continue;
+            // handle CSS imports by creating a virtual module that injects a <link> to the CSS
+            if (spec.endsWith('.css')) {
+              const cssAbs = resolveUrl(spec, url);
+              const cssModuleCode = `const href = ${JSON.stringify(cssAbs)}; (function(){ if(!document.querySelector('link[data-injected-module-css="'+href+'"]')){ var l=document.createElement('link'); l.rel='stylesheet'; l.href=href; l.setAttribute('data-injected-module-css', href); document.head.appendChild(l);} })(); export default href;`;
+              const cssBlob = new Blob([cssModuleCode], { type: 'text/javascript' });
+              const cssBlobUrl = URL.createObjectURL(cssBlob);
+              // treat this dependency as processed and use its blob URL
+              replacements.push({ start: m.index, spec, blob: cssBlobUrl });
+              continue;
+            }
+            let depUrl;
+            if (spec === 'react' || spec === 'react-dom' || spec === 'html5-qrcode' || spec === 'qrcode') {
+              depUrl = createVirtualModule(spec);
+            } else {
+              depUrl = resolveUrl(spec, url);
+              depUrl = await processModule(depUrl);
+            }
+            // record replacement: replace the original import specifier string with the blob URL
+            replacements.push({ start: m.index, spec, blob: depUrl });
+          }
+
+          // Replace import specifiers occurrences (simple replace of "spec" to "blobURL")
+          // Safer to replace all exact occurrences of '"spec"' and '\'spec\'' with the blob URL
+          replacements.forEach(r => {
+            // build a RegExp that matches the original quoted import specifier and replace it with the blob URL
+            const escapedSpec = r.spec.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+            const re1 = new RegExp('(["\'])' + escapedSpec + '\\1', 'g');
+            code = code.replace(re1, `"${r.blob}"`);
+          });
+
+          // transpile JSX (preserve import/export) with Babel standalone
+          try {
+            const transformed = Babel.transform(code, { presets: ['react'], sourceType: 'module' }).code;
+            const blob = new Blob([transformed], { type: 'text/javascript' });
+            const blobUrl = URL.createObjectURL(blob);
+            blobCache.set(url, blobUrl);
+            return blobUrl;
+          } catch (err) {
+            console.error('Babel transform failed for', url, err);
+            throw err;
+          }
+        }
+
+        // Start from the src entry relative to this HTML file
+        const entry = new URL('../src/index.jsx', window.location.href).href;
+        try {
+          const entryBlob = await processModule(entry);
+          await import(entryBlob);
+        } catch (err) {
+          console.error('Module loader error', err);
+          // show on overlay
+          const overlay = document.getElementById('js-error-overlay');
+          const content = document.getElementById('js-error-content');
+          if (overlay && content) { content.textContent = String(err); overlay.style.display = 'block'; }
+        }
+      })();
+    </script>
+
+  </body>
+</html>
